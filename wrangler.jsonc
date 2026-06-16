@@ -1,0 +1,10 @@
+{
+  "name": "abilifi-linux",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-01-01",
+  "workers_dev": true,
+  "d1_databases": [{ "binding": "DB", "database_name": "abilifi-linux-db" }],
+  "durable_objects": { "bindings": [{ "name": "Sandbox", "class_name": "Sandbox" }] },
+  "containers": [{ "class_name": "Sandbox", "image": "./Dockerfile", "instance_type": "lite", "max_instances": 5 }],
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Sandbox"] }]
+}
