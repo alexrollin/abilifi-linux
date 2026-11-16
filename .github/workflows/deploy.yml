@@ -1,15 +1,11 @@
 name: Deploy abilifi-linux (Cloudflare Sandbox container)
 
-# Deploy hop for BEB-9809 = GitHub Actions (Fable m73451/m73453), replacing the dead
-# box-door hop for containers. The container image (./Dockerfile) builds in the Actions
-# runner and is pushed to Cloudflare by wrangler — no laptop, no box, no local wrangler.
-# Config-only rule (graph d11c2f6ca631ea05) still holds: no hand-written image beyond the
-# repo's existing Dockerfile.
-#
-# Required repo secrets (Alex sets once via `gh secret set` — CC's shell is walled from it):
-#   CLOUDFLARE_API_TOKEN   — keeper deploy token (Workers Scripts:Edit, D1, Durable Objects,
-#                            Containers/Workers Builds, Account/Zone read as the token needs)
-#   CLOUDFLARE_ACCOUNT_ID  — keeper account id (e7eb1ac8...)
+# Deploy hop for BEB-9809 = GitHub Actions, no laptop, no box, no person.
+# Credentials are read at run time from the abilifi vault BY NAME
+# (cf:keeper-global-key + cf:keeper-email), so no Cloudflare value is ever pasted
+# anywhere. The only repo secret is VAULT_KEY, the agent key the vault already accepts.
+# If a CLOUDFLARE_API_TOKEN repo secret exists, it is used instead.
+# Rule node d11c2f6ca631ea05: config-only, no hand-written image beyond ./Dockerfile.
 
 on:
   push:
@@ -20,6 +16,10 @@ concurrency:
   group: deploy-abilifi-linux
   cancel-in-progress: false
 
+env:
+  CLOUDFLARE_ACCOUNT_ID: e7eb1ac8384be6f4f05e8f95c4b3240a
+  VAULT_URL: https://abilifi-vault.alex-rollin.workers.dev
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -29,14 +29,41 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Install deps
         run: npm ci || npm install
 
+      - name: Get Cloudflare credentials (repo token, else vault by name)
+        env:
+          CF_TOKEN_SECRET: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          VAULT_KEY: ${{ secrets.VAULT_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "${CF_TOKEN_SECRET:-}" ]; then
+            echo "::add-mask::$CF_TOKEN_SECRET"
+            echo "CLOUDFLARE_API_TOKEN=$CF_TOKEN_SECRET" >> "$GITHUB_ENV"
+            echo "credential source: repo secret CLOUDFLARE_API_TOKEN"
+            exit 0
+          fi
+          if [ -z "${VAULT_KEY:-}" ]; then
+            echo "MISSING: neither CLOUDFLARE_API_TOKEN nor VAULT_KEY repo secret is set" >&2
+            exit 1
+          fi
+          get() {
+            curl -sS --fail-with-body -X POST "$VAULT_URL/vault/checkout-self" \
+              -H "Authorization: Bearer $VAULT_KEY" -H "Content-Type: application/json" \
+              -d "{\"name\":\"$1\"}" | jq -r '.token // .value // empty'
+          }
+          KEY="$(get cf:keeper-global-key)"; EMAIL="$(get cf:keeper-email)"
+          if [ -z "$KEY" ] || [ -z "$EMAIL" ]; then
+            echo "MISSING: vault returned no value for cf:keeper-global-key or cf:keeper-email" >&2
+            exit 1
+          fi
+          echo "::add-mask::$KEY"; echo "::add-mask::$EMAIL"
+          echo "CLOUDFLARE_API_KEY=$KEY" >> "$GITHUB_ENV"
+          echo "CLOUDFLARE_EMAIL=$EMAIL" >> "$GITHUB_ENV"
+          echo "credential source: vault (cf:keeper-global-key, cf:keeper-email), lengths ${#KEY}/${#EMAIL}"
+
       - name: Deploy to Cloudflare (builds the container image remotely)
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: deploy
+        run: npx wrangler deploy
