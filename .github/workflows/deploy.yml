@@ -1,0 +1,42 @@
+name: Deploy abilifi-linux (Cloudflare Sandbox container)
+
+# Deploy hop for BEB-9809 = GitHub Actions (Fable m73451/m73453), replacing the dead
+# box-door hop for containers. The container image (./Dockerfile) builds in the Actions
+# runner and is pushed to Cloudflare by wrangler — no laptop, no box, no local wrangler.
+# Config-only rule (graph d11c2f6ca631ea05) still holds: no hand-written image beyond the
+# repo's existing Dockerfile.
+#
+# Required repo secrets (Alex sets once via `gh secret set` — CC's shell is walled from it):
+#   CLOUDFLARE_API_TOKEN   — keeper deploy token (Workers Scripts:Edit, D1, Durable Objects,
+#                            Containers/Workers Builds, Account/Zone read as the token needs)
+#   CLOUDFLARE_ACCOUNT_ID  — keeper account id (e7eb1ac8...)
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-abilifi-linux
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install deps
+        run: npm ci || npm install
+
+      - name: Deploy to Cloudflare (builds the container image remotely)
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy
