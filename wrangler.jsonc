@@ -2,6 +2,7 @@
   "name": "abilifi-linux",
   "main": "src/index.ts",
   "compatibility_date": "2025-01-01",
+  "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
   "d1_databases": [{ "binding": "DB", "database_name": "abilifi-linux-db" }],
   "durable_objects": { "bindings": [{ "name": "Sandbox", "class_name": "Sandbox" }] },
