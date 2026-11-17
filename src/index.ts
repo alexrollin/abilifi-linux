@@ -5,7 +5,18 @@
 import { getSandbox } from '@cloudflare/sandbox';
 export { Sandbox } from '@cloudflare/sandbox';
 
-interface Env { DB: D1Database; Sandbox: DurableObjectNamespace }
+interface Env { DB: D1Database; Sandbox: DurableObjectNamespace; LINUX_GATE?: string }
+
+// SECURITY (11-16, Fable m73484/m73485): the old auth was `startsWith('Bearer bb_')` only — any forged header
+// passed, and /linux/exec runs arbitrary bash in a container billed to the account. Interim gate until the
+// vault/Ory verification lands (BEB-9807): FAIL CLOSED. With no LINUX_GATE worker secret every route is 503;
+// with one, the caller must present it in X-Linux-Gate, compared in constant time, independent of the vault.
+function ctEq(a: string, b: string): boolean {
+  const enc = new TextEncoder(), x = enc.encode(a), y = enc.encode(b);
+  let d = x.length ^ y.length;
+  for (let i = 0; i < Math.max(x.length, y.length); i++) d |= (x[i] ?? 0) ^ (y[i] ?? 0);
+  return d === 0;
+}
 
 let schemaReady: Promise<void> | null = null;
 function ensureSchema(env: Env): Promise<void> {
@@ -18,6 +29,13 @@ function ensureSchema(env: Env): Promise<void> {
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
+    const gate = env.LINUX_GATE;
+    if (!gate || gate.length < 32) {
+      return new Response('Service disabled: awaiting verified auth (BEB-9807 / BEB-9809)', { status: 503 });
+    }
+    if (!ctEq(req.headers.get('X-Linux-Gate') || '', gate)) {
+      return new Response('Unauthorized (gate)', { status: 401 });
+    }
     const authHeader = req.headers.get('Authorization');
     if (!authHeader || !authHeader.startsWith('Bearer bb_')) {
       return new Response('Unauthorized', { status: 401 });

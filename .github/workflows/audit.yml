@@ -1,0 +1,47 @@
+name: Audit abilifi-linux exposure (read-only)
+
+# Fable m73484 #5: bound the exposure window of the open bb_-prefix route. Every /linux/provision writes a
+# row to D1 linux_env (even on error) and /linux/exec needs an existing row, so the row count + timestamps
+# bound what a forged caller could have done. Read-only: one SELECT count + a listing WITHOUT the spec column.
+# Credentials come from the vault by name exactly as in deploy.yml; nothing is printed that is a secret.
+
+on:
+  workflow_dispatch: {}
+
+env:
+  CLOUDFLARE_ACCOUNT_ID: e7eb1ac8384be6f4f05e8f95c4b3240a
+  VAULT_URL: https://abilifi-vault.alex-rollin.workers.dev
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install deps
+        run: npm ci || npm install
+
+      - name: Get Cloudflare credentials (vault by name)
+        env:
+          VAULT_KEY: ${{ secrets.VAULT_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "${VAULT_KEY:-}" ] || { echo "MISSING: VAULT_KEY repo secret" >&2; exit 1; }
+          get() {
+            curl -sS --fail-with-body -X POST "$VAULT_URL/vault/checkout-self" \
+              -H "Authorization: Bearer $VAULT_KEY" -H "Content-Type: application/json" \
+              -d "{\"name\":\"$1\"}" | jq -r '.token // .value // empty'
+          }
+          KEY="$(get cf:keeper-global-key)"; EMAIL="$(get cf:keeper-email)"
+          [ -n "$KEY" ] && [ -n "$EMAIL" ] || { echo "MISSING: vault returned no cred" >&2; exit 1; }
+          echo "::add-mask::$KEY"; echo "::add-mask::$EMAIL"
+          echo "CLOUDFLARE_API_KEY=$KEY" >> "$GITHUB_ENV"
+          echo "CLOUDFLARE_EMAIL=$EMAIL" >> "$GITHUB_ENV"
+
+      - name: How many sandboxes were ever provisioned, and when
+        run: |
+          npx wrangler d1 execute abilifi-linux-db --remote --command "SELECT COUNT(*) AS total_rows, MIN(ts) AS first_ts, MAX(ts) AS last_ts FROM linux_env"
+          npx wrangler d1 execute abilifi-linux-db --remote --command "SELECT org, id, status, ts FROM linux_env ORDER BY ts DESC LIMIT 25"
