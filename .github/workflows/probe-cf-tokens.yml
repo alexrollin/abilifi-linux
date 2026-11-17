@@ -1,0 +1,46 @@
+name: Probe Cloudflare API-token creation on keeper (read-only)
+
+# Fable m73539 #1: before building token vending, answer yes/no — does the keeper account let an ACCOUNT-owned
+# token create API tokens? Read-only: lists the account-token endpoint and the permission groups; creates nothing.
+# Credentials come from the vault by name (VAULT_KEY), masked.
+
+on:
+  workflow_dispatch: {}
+
+env:
+  CLOUDFLARE_ACCOUNT_ID: e7eb1ac8384be6f4f05e8f95c4b3240a
+  VAULT_URL: https://abilifi-vault.alex-rollin.workers.dev
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Probe (global key from the vault, read-only)
+        env:
+          VAULT_KEY: ${{ secrets.VAULT_KEY }}
+        run: |
+          set -uo pipefail
+          [ -n "${VAULT_KEY:-}" ] || { echo "MISSING: VAULT_KEY" >&2; exit 1; }
+          get() { curl -sS -X POST "$VAULT_URL/vault/checkout-self" -H "Authorization: Bearer $VAULT_KEY" -H "Content-Type: application/json" -d "{\"name\":\"$1\"}" | jq -r '.token // .value // empty'; }
+          KEY="$(get cf:keeper-global-key)"; EMAIL="$(get cf:keeper-email)"
+          [ -n "$KEY" ] && [ -n "$EMAIL" ] || { echo "MISSING: vault cred empty" >&2; exit 1; }
+          echo "::add-mask::$KEY"; echo "::add-mask::$EMAIL"
+          A=(-H "X-Auth-Email: $EMAIL" -H "X-Auth-Key: $KEY" -H "Content-Type: application/json")
+          B="https://api.cloudflare.com/client/v4"
+
+          echo "== 1) account-owned token endpoint: GET /accounts/\$ACC/tokens"
+          code=$(curl -sS -o r1.json -w '%{http_code}' "${A[@]}" "$B/accounts/$CLOUDFLARE_ACCOUNT_ID/tokens")
+          echo "http $code"; jq -c '{success, errors: [.errors[]?|{code,message}], tokens: (.result|length? // 0)}' r1.json
+
+          echo "== 2) permission groups available to an account token: GET /accounts/\$ACC/tokens/permission_groups"
+          code=$(curl -sS -o r2.json -w '%{http_code}' "${A[@]}" "$B/accounts/$CLOUDFLARE_ACCOUNT_ID/tokens/permission_groups")
+          echo "http $code"; jq -c '{success, errors: [.errors[]?|{code,message}], total_groups: (.result|length? // 0)}' r2.json
+          echo "-- groups whose name mentions API Tokens:"
+          jq -r '[.result[]?|select(.name|test("api tokens";"i"))|.name]|unique|.[]' r2.json
+          echo "-- groups we would need for a deploy token (names only):"
+          jq -r '[.result[]?|select(.name|test("^(Workers Scripts|Workers Containers|Cloudchamber|D1|Workers KV Storage|Workers R2 Storage|Account Settings) ";"i") or test("Containers|Cloudchamber";"i"))|.name]|unique|.[]' r2.json | head -30
+
+          echo "== 3) user-owned token endpoint (global key): GET /user/tokens"
+          code=$(curl -sS -o r3.json -w '%{http_code}' "${A[@]}" "$B/user/tokens")
+          echo "http $code"; jq -c '{success, errors: [.errors[]?|{code,message}], tokens: (.result|length? // 0)}' r3.json
