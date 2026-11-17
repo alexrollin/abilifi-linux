@@ -48,17 +48,23 @@ export default {
       const id = crypto.randomUUID();
       const name = `${org}:${id}`;
       const sb = getSandbox(env.Sandbox, name);
+      let step = 'start';
       try {
+        step = 'apt-get update';
         await sb.exec('apt-get update');
-        if (spec.apt?.length) await sb.exec(`apt-get install -y ${spec.apt.join(' ')}`);
-        for (const line of (spec.run || [])) await sb.exec(line);
+        if (spec.apt?.length) { step = 'apt-get install'; await sb.exec(`apt-get install -y ${spec.apt.join(' ')}`); }
+        let i = 0;
+        for (const line of (spec.run || [])) { step = `run[${i++}]`; await sb.exec(line); }
         await env.DB.prepare('INSERT OR REPLACE INTO linux_env (org, id, spec, status, ts) VALUES (?, ?, ?, ?, ?)')
           .bind(org, id, JSON.stringify(spec), 'ready', Date.now()).run();
         return Response.json({ id, status: 'ready' });
       } catch (e: any) {
         await env.DB.prepare('INSERT OR REPLACE INTO linux_env (org, id, spec, status, ts) VALUES (?, ?, ?, ?, ?)')
           .bind(org, id, JSON.stringify(spec), 'error', Date.now()).run();
-        return Response.json({ id, status: 'error', error: e?.message }, { status: 500 });
+        // diagnostics for the intermittent container-start 500: WHICH exec failed, the error class, its cause and the top of its stack
+        const diag = { failed_step: step, name: e?.name, cause: String(e?.cause ?? '').slice(0, 300), stack: String(e?.stack ?? '').split('\n').slice(0, 5).join(' | ').slice(0, 500) };
+        console.error(JSON.stringify({ evt: 'provision_error', id, error: e?.message, ...diag }));
+        return Response.json({ id, status: 'error', error: e?.message, ...diag }, { status: 500 });
       }
     }
 

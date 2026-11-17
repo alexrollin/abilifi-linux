@@ -19,6 +19,10 @@ on:
         required: true
         default: "Create the file /workspace/hello.txt containing exactly: coder-ok-from-container. Then print the file."
 
+concurrency:
+  group: coder-run
+  cancel-in-progress: false
+
 env:
   CLOUDFLARE_ACCOUNT_ID: e7eb1ac8384be6f4f05e8f95c4b3240a
   VAULT_URL: https://abilifi-vault.alex-rollin.workers.dev
@@ -48,6 +52,7 @@ jobs:
           hdr() { printf '%s\n' "$P" | awk 'BEGIN{h=1} h && /^(repo|base|branch|ticket):/ {print; next} {h=0}' | sed -n "s/^$1:[[:space:]]*//p" | head -1 | tr -d '\r'; }
           JOB_REPO="$(hdr repo)"; JOB_BASE="$(hdr base)"; JOB_BRANCH="$(hdr branch)"; JOB_TICKET="$(hdr ticket)"
           P="$(printf '%s\n' "$P" | awk 'BEGIN{h=1} h && /^(repo|base|branch|ticket):/ {next} {h=0; print}' | sed '1{/^[[:space:]]*$/d}')"
+          [ -n "$(printf '%s' "$P" | tr -d '[:space:]')" ] || { echo "VERDICT: FAILED — empty job prompt, nothing to run" >&2; exit 1; }
           [ -z "$JOB_REPO" ] || printf '%s' "$JOB_REPO" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' || { echo "bad repo: $JOB_REPO" >&2; exit 1; }
           JOB_BASE="${JOB_BASE:-master}"
           JOB_BRANCH="${JOB_BRANCH:-coder/${JOB_TICKET:-job}-$(date -u +%Y%m%d%H%M%S)}"
@@ -140,7 +145,12 @@ jobs:
           echo "---- stderr ----";  jq -r '.stderr // empty' exec.json | tail -n 40
           echo "---- exitCode: $(jq -r '.exitCode' exec.json)"
           { echo "### coder turn"; echo "sandbox: \`$SANDBOX_ID\`  exit: \`$(jq -r '.exitCode' exec.json)\`"; echo '```'; jq -r '.stdout // empty' exec.json | tail -n 40; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-          [ "$(jq -r '.exitCode' exec.json)" = "0" ]
+          EC="$(jq -r '.exitCode' exec.json)"
+          if [ "$EC" != "0" ]; then echo "VERDICT: FAILED — coder exited $EC (red, no false green)"; exit 1; fi
+          if [ -n "${JOB_REPO:-}" ] && ! jq -r '.stdout // empty' exec.json | grep -q '^PUSHED '; then
+            echo "VERDICT: FAILED — repo job ended with no pushed branch"; exit 1
+          fi
+          echo "VERDICT: OK — coder exit 0${JOB_REPO:+, branch pushed: $(jq -r '.stdout // empty' exec.json | grep '^PUSHED ' | head -1)}"
 
       - name: Destroy the sandbox (free the container, even on failure)
         if: always()
