@@ -1,6 +1,6 @@
 {
   "name": "abilifi-linux",
   "type": "module",
-  "dependencies": { "@cloudflare/sandbox": "^0.10.1" },
+  "dependencies": { "@cloudflare/sandbox": "0.10.1" },
   "devDependencies": { "wrangler": "^4" }
 }
