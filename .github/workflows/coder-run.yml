@@ -1,0 +1,97 @@
+name: Run a coder turn in the container (BEB-9809)
+
+# The headless coder route (Fable m73485 #2): GitHub Actions drives the abilifi-linux sandbox, so no Intent app,
+# no laptop and no person is involved. The sandbox's provision/exec are FAIL-CLOSED (503 with no LINUX_GATE).
+# Per run: a fresh random gate is generated, set as the worker secret, used for this run only, and ROTATED AWAY
+# at the end — nobody holds the gate between runs, so the route is closed to the world. The model key comes from
+# the vault by name (openrouter:key) and is never printed. Secrets are masked in logs.
+
+on:
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: "The task the coder runs (opencode run <prompt>)"
+        required: true
+        default: "Create the file /workspace/hello.txt containing exactly: coder-ok-from-container. Then print the file."
+
+env:
+  CLOUDFLARE_ACCOUNT_ID: e7eb1ac8384be6f4f05e8f95c4b3240a
+  VAULT_URL: https://abilifi-vault.alex-rollin.workers.dev
+  WORKER_URL: https://abilifi-linux.nlrollin02.workers.dev
+
+jobs:
+  coder:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install deps
+        run: npm ci || npm install
+
+      - name: Get credentials from the vault by name
+        env:
+          VAULT_KEY: ${{ secrets.VAULT_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "${VAULT_KEY:-}" ] || { echo "MISSING: VAULT_KEY repo secret" >&2; exit 1; }
+          get() {
+            curl -sS --fail-with-body -X POST "$VAULT_URL/vault/checkout-self" \
+              -H "Authorization: Bearer $VAULT_KEY" -H "Content-Type: application/json" \
+              -d "{\"name\":\"$1\"}" | jq -r '.token // .value // empty'
+          }
+          KEY="$(get cf:keeper-global-key)"; EMAIL="$(get cf:keeper-email)"; ORK="$(get openrouter:key)"
+          [ -n "$KEY" ] && [ -n "$EMAIL" ] && [ -n "$ORK" ] || { echo "MISSING: a vault cred came back empty" >&2; exit 1; }
+          for v in "$KEY" "$EMAIL" "$ORK"; do echo "::add-mask::$v"; done
+          { echo "CLOUDFLARE_API_KEY=$KEY"; echo "CLOUDFLARE_EMAIL=$EMAIL"; echo "OR_KEY=$ORK"; } >> "$GITHUB_ENV"
+          echo "creds loaded (lengths: cf-key ${#KEY}, email ${#EMAIL}, model-key ${#ORK})"
+
+      - name: Open the gate for THIS run only (fresh random worker secret)
+        run: |
+          set -euo pipefail
+          GATE="$(openssl rand -hex 32)"
+          echo "::add-mask::$GATE"
+          echo "GATE=$GATE" >> "$GITHUB_ENV"
+          printf '%s' "$GATE" | npx wrangler secret put LINUX_GATE
+          # wait until the worker enforces the gate (401 for a no-header call = gate set; 503 = still unset)
+          for i in $(seq 1 30); do
+            code="$(curl -s -o /dev/null -w '%{http_code}' "$WORKER_URL/linux/status/x" || true)"
+            echo "gate check $i: no-header -> $code"
+            [ "$code" = "401" ] && break
+            sleep 4
+          done
+          [ "$code" = "401" ] || { echo "gate never took effect" >&2; exit 1; }
+
+      - name: Provision the sandbox (apt + opencode install)
+        run: |
+          set -euo pipefail
+          SPEC="$(jq -c '{spec: .}' coder/provision-spec.json)"
+          curl -sS --max-time 900 -o prov.json -w 'provision http %{http_code}\n' -X POST "$WORKER_URL/linux/provision" \
+            -H "X-Linux-Gate: $GATE" -H "Authorization: Bearer bb_000coder" -H 'Content-Type: application/json' -d "$SPEC"
+          cat prov.json; echo
+          ID="$(jq -r '.id // empty' prov.json)"
+          [ -n "$ID" ] && [ "$(jq -r '.status' prov.json)" = "ready" ] || { echo "provision did not reach ready" >&2; exit 1; }
+          echo "SANDBOX_ID=$ID" >> "$GITHUB_ENV"
+
+      - name: Run the coder turn inside the sandbox
+        env:
+          PROMPT: ${{ github.event.inputs.prompt }}
+        run: |
+          set -euo pipefail
+          { printf 'export OPENROUTER_API_KEY=%q\n' "$OR_KEY"; printf 'export PROMPT=%q\n' "$PROMPT"; cat coder/boot.sh; } > run.sh
+          BODY="$(jq -n --arg id "$SANDBOX_ID" --rawfile code run.sh '{id:$id, code:$code, lang:"bash"}')"
+          curl -sS --max-time 1200 -o exec.json -w 'exec http %{http_code}\n' -X POST "$WORKER_URL/linux/exec" \
+            -H "X-Linux-Gate: $GATE" -H "Authorization: Bearer bb_000coder" -H 'Content-Type: application/json' -d "$BODY"
+          echo "---- stdout ----";  jq -r '.stdout // empty' exec.json
+          echo "---- stderr ----";  jq -r '.stderr // empty' exec.json | tail -n 40
+          echo "---- exitCode: $(jq -r '.exitCode' exec.json)"
+          { echo "### coder turn"; echo "sandbox: \`$SANDBOX_ID\`  exit: \`$(jq -r '.exitCode' exec.json)\`"; echo '```'; jq -r '.stdout // empty' exec.json | tail -n 40; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          [ "$(jq -r '.exitCode' exec.json)" = "0" ]
+
+      - name: Close the gate again (rotate to a value nobody knows)
+        if: always()
+        run: |
+          openssl rand -hex 32 | npx wrangler secret put LINUX_GATE
+          echo "gate rotated away — the route is closed to everyone until the next run"

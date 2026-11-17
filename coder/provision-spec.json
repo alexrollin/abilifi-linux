@@ -1,0 +1,9 @@
+{
+  "_comment": "BEB-9809 coder sandbox provision spec (trimmed from abilifi-coder-runner/provision-spec.json: no chromium/ffmpeg for the first proof — filming is a later step). Fed to /linux/provision {spec}.",
+  "apt": ["git", "ca-certificates", "curl", "unzip"],
+  "run": [
+    "bash -c 'curl -fsSL https://opencode.ai/install | bash'",
+    "bash -c 'export PATH=$HOME/.opencode/bin:$PATH; opencode --version'",
+    "mkdir -p /root/.config/opencode /workspace"
+  ]
+}
