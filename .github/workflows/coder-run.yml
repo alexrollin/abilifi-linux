@@ -105,16 +105,23 @@ jobs:
           done
           [ "$ok" -ge 6 ] || { echo "gate never took effect everywhere" >&2; exit 1; }
 
-      - name: Provision the sandbox (apt + opencode install)
+      - name: Provision the sandbox (apt + opencode install; up to 3 attempts, destroying each failed one)
         run: |
-          set -euo pipefail
+          set -uo pipefail
           SPEC="$(jq -c '{spec: .}' coder/provision-spec.json)"
-          curl -sS --max-time 900 -o prov.json -w 'provision http %{http_code}\n' -X POST "$WORKER_URL/linux/provision" \
-            -H "X-Linux-Gate: $GATE" -H "Authorization: Bearer bb_000coder" -H 'Content-Type: application/json' -d "$SPEC"
-          cat prov.json; echo
-          ID="$(jq -r '.id // empty' prov.json 2>/dev/null || true)"
-          [ -z "$ID" ] || echo "SANDBOX_ID=$ID" >> "$GITHUB_ENV"
-          [ -n "$ID" ] && [ "$(jq -r '.status' prov.json)" = "ready" ] || { echo "provision did not reach ready" >&2; exit 1; }
+          for attempt in 1 2 3; do
+            curl -sS --max-time 900 -o prov.json -w "provision attempt $attempt http %{http_code}\n" -X POST "$WORKER_URL/linux/provision" \
+              -H "X-Linux-Gate: $GATE" -H "Authorization: Bearer bb_000coder" -H 'Content-Type: application/json' -d "$SPEC" || true
+            cat prov.json; echo
+            ID="$(jq -r '.id // empty' prov.json 2>/dev/null || true)"
+            if [ -n "$ID" ] && [ "$(jq -r '.status' prov.json 2>/dev/null)" = "ready" ]; then
+              echo "SANDBOX_ID=$ID" >> "$GITHUB_ENV"; echo "sandbox ready on attempt $attempt"; exit 0
+            fi
+            [ -z "$ID" ] || curl -sS --max-time 120 -X POST "$WORKER_URL/linux/destroy" \
+              -H "X-Linux-Gate: $GATE" -H "Authorization: Bearer bb_000coder" -H 'Content-Type: application/json' -d "{\"id\":\"$ID\"}" >/dev/null || true
+            sleep 20
+          done
+          echo "provision failed after 3 attempts" >&2; exit 1
 
       - name: Run the coder turn inside the sandbox
         env:
