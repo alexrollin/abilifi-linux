@@ -55,14 +55,18 @@ jobs:
           echo "::add-mask::$GATE"
           echo "GATE=$GATE" >> "$GITHUB_ENV"
           printf '%s' "$GATE" | npx wrangler secret put LINUX_GATE
-          # wait until the worker enforces the gate (401 for a no-header call = gate set; 503 = still unset)
-          for i in $(seq 1 30); do
-            code="$(curl -s -o /dev/null -w '%{http_code}' "$WORKER_URL/linux/status/x" || true)"
-            echo "gate check $i: no-header -> $code"
-            [ "$code" = "401" ] && break
+          # wait until EVERY isolate we hit accepts this run's gate: with the gate header the status route answers
+          # 404 (gate + org auth pass, unknown id); a stale isolate still holding the old/rotated gate answers 401.
+          # Require 6 consecutive 404s (a secret update does not roll out to all isolates atomically).
+          ok=0
+          for i in $(seq 1 60); do
+            code="$(curl -s -o /dev/null -w '%{http_code}' -H "X-Linux-Gate: $GATE" -H 'Authorization: Bearer bb_000coder' "$WORKER_URL/linux/status/x" || true)"
+            echo "gate check $i: with-gate -> $code"
+            if [ "$code" = "404" ]; then ok=$((ok+1)); else ok=0; fi
+            [ "$ok" -ge 6 ] && break
             sleep 4
           done
-          [ "$code" = "401" ] || { echo "gate never took effect" >&2; exit 1; }
+          [ "$ok" -ge 6 ] || { echo "gate never took effect everywhere" >&2; exit 1; }
 
       - name: Provision the sandbox (apt + opencode install)
         run: |
