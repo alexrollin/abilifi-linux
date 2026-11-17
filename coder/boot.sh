@@ -25,6 +25,9 @@ if [ -n "${REPO:-}" ]; then
   [ -d /workspace/repo/.git ] || { echo "CLONE FAILED for $REPO"; exit 3; }
   cd /workspace/repo
   git checkout -q -b "$BRANCH"
+  # never commit build/runtime junk the coder's own test runs create (job 3 pushed a __pycache__/*.pyc)
+  printf '__pycache__/\n*.pyc\n.pytest_cache/\nnode_modules/\n.DS_Store\n' > /tmp/coder-gitignore
+  git config core.excludesFile /tmp/coder-gitignore
   WORKDIR=/workspace/repo
 fi
 cd "$WORKDIR"
