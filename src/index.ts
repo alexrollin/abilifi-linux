@@ -77,6 +77,17 @@ export default {
       }
     }
 
+    if (req.method === 'POST' && url.pathname === '/linux/destroy') {
+      // free the container (max_instances is small; runs must not leak sandboxes). The row stays as the audit trail.
+      const { id } = await req.json() as any;
+      const row = await env.DB.prepare('SELECT id FROM linux_env WHERE org = ? AND id = ?').bind(org, id).first();
+      if (!row) return new Response('Not Found', { status: 404 });
+      let destroyed = false;
+      try { await (getSandbox(env.Sandbox, `${org}:${id}`) as any).destroy(); destroyed = true; } catch (_e) { /* already gone */ }
+      await env.DB.prepare('UPDATE linux_env SET status = ?, ts = ? WHERE org = ? AND id = ?').bind('destroyed', Date.now(), org, id).run();
+      return Response.json({ id, status: 'destroyed', container_destroyed: destroyed });
+    }
+
     if (req.method === 'GET' && url.pathname.startsWith('/linux/status/')) {
       const id = url.pathname.split('/').pop();
       const r: any = await env.DB.prepare('SELECT id, status, ts FROM linux_env WHERE org = ? AND id = ?').bind(org, id).first();

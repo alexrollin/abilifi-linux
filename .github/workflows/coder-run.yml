@@ -112,9 +112,9 @@ jobs:
           curl -sS --max-time 900 -o prov.json -w 'provision http %{http_code}\n' -X POST "$WORKER_URL/linux/provision" \
             -H "X-Linux-Gate: $GATE" -H "Authorization: Bearer bb_000coder" -H 'Content-Type: application/json' -d "$SPEC"
           cat prov.json; echo
-          ID="$(jq -r '.id // empty' prov.json)"
+          ID="$(jq -r '.id // empty' prov.json 2>/dev/null || true)"
+          [ -z "$ID" ] || echo "SANDBOX_ID=$ID" >> "$GITHUB_ENV"
           [ -n "$ID" ] && [ "$(jq -r '.status' prov.json)" = "ready" ] || { echo "provision did not reach ready" >&2; exit 1; }
-          echo "SANDBOX_ID=$ID" >> "$GITHUB_ENV"
 
       - name: Run the coder turn inside the sandbox
         env:
@@ -134,6 +134,15 @@ jobs:
           echo "---- exitCode: $(jq -r '.exitCode' exec.json)"
           { echo "### coder turn"; echo "sandbox: \`$SANDBOX_ID\`  exit: \`$(jq -r '.exitCode' exec.json)\`"; echo '```'; jq -r '.stdout // empty' exec.json | tail -n 40; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           [ "$(jq -r '.exitCode' exec.json)" = "0" ]
+
+      - name: Destroy the sandbox (free the container, even on failure)
+        if: always()
+        run: |
+          [ -n "${SANDBOX_ID:-}" ] || { echo "no sandbox to destroy"; exit 0; }
+          curl -sS --max-time 120 -X POST "$WORKER_URL/linux/destroy" \
+            -H "X-Linux-Gate: $GATE" -H "Authorization: Bearer bb_000coder" -H 'Content-Type: application/json' \
+            -d "{\"id\":\"$SANDBOX_ID\"}" || true
+          echo
 
       - name: Close the gate again (rotate to a value nobody knows)
         if: always()
