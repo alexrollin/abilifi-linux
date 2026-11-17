@@ -67,9 +67,14 @@ export default {
       const row = await env.DB.prepare('SELECT id FROM linux_env WHERE org = ? AND id = ?').bind(org, id).first();
       if (!row) return new Response('Not Found', { status: 404 });
       const sb = getSandbox(env.Sandbox, `${org}:${id}`);
-      await sb.writeFile('/tmp/x', code);
-      const r = await sb.exec(lang === 'python' ? 'python3 /tmp/x' : 'bash /tmp/x');
-      return Response.json({ stdout: r.stdout, stderr: r.stderr, exitCode: r.exitCode });
+      try {
+        await sb.writeFile('/tmp/x', code);
+        const r = await sb.exec(lang === 'python' ? 'python3 /tmp/x' : 'bash /tmp/x');
+        return Response.json({ stdout: r.stdout, stderr: r.stderr, exitCode: r.exitCode });
+      } catch (e: any) {
+        // return the failure as JSON (never a bare 1101) so the caller can see what the container/SDK threw
+        return Response.json({ error: String(e?.message || e), name: e?.name, exitCode: -1 }, { status: 500 });
+      }
     }
 
     if (req.method === 'GET' && url.pathname.startsWith('/linux/status/')) {
