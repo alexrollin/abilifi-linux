@@ -110,47 +110,10 @@ jobs:
           done
           [ "$ok" -ge 6 ] || { echo "gate never took effect everywhere" >&2; exit 1; }
 
-      - name: Provision the sandbox (apt + opencode install; up to 3 attempts, destroying each failed one)
-        run: |
-          set -uo pipefail
-          SPEC="$(jq -c '{spec: .}' coder/provision-spec.json)"
-          for attempt in 1 2 3; do
-            curl -sS --max-time 900 -o prov.json -w "provision attempt $attempt http %{http_code}\n" -X POST "$WORKER_URL/linux/provision" \
-              -H "X-Linux-Gate: $GATE" -H "Authorization: Bearer bb_000coder" -H 'Content-Type: application/json' -d "$SPEC" || true
-            cat prov.json; echo
-            ID="$(jq -r '.id // empty' prov.json 2>/dev/null || true)"
-            if [ -n "$ID" ] && [ "$(jq -r '.status' prov.json 2>/dev/null)" = "ready" ]; then
-              echo "SANDBOX_ID=$ID" >> "$GITHUB_ENV"; echo "sandbox ready on attempt $attempt"; exit 0
-            fi
-            [ -z "$ID" ] || curl -sS --max-time 120 -X POST "$WORKER_URL/linux/destroy" \
-              -H "X-Linux-Gate: $GATE" -H "Authorization: Bearer bb_000coder" -H 'Content-Type: application/json' -d "{\"id\":\"$ID\"}" >/dev/null || true
-            sleep 20
-          done
-          echo "provision failed after 3 attempts" >&2; exit 1
-
-      - name: Run the coder turn inside the sandbox
+      - name: Provision + run the coder turn (retries only fast failures where nothing ran)
         env:
           PROMPT: ${{ env.JOB_PROMPT }}
-        run: |
-          set -euo pipefail
-          { printf 'export OPENROUTER_API_KEY=%q\n' "$OR_KEY"; printf 'export PROMPT=%q\n' "$PROMPT";
-            printf 'export REPO=%q BASE=%q BRANCH=%q TICKET=%q\n' "${JOB_REPO:-}" "${JOB_BASE:-master}" "${JOB_BRANCH:-}" "${JOB_TICKET:-}";
-            [ -z "${GHTOK:-}" ] || printf 'export GHTOK=%q\n' "$GHTOK";
-            cat coder/boot.sh; } > run.sh
-          BODY="$(jq -n --arg id "$SANDBOX_ID" --rawfile code run.sh '{id:$id, code:$code, lang:"bash"}')"
-          curl -sS --max-time 1200 -o exec.json -w 'exec http %{http_code}\n' -X POST "$WORKER_URL/linux/exec" \
-            -H "X-Linux-Gate: $GATE" -H "Authorization: Bearer bb_000coder" -H 'Content-Type: application/json' -d "$BODY"
-          if [ "$(head -c1 exec.json)" != "{" ]; then echo "---- RAW exec response (not JSON) ----"; head -c 800 exec.json; echo; exit 1; fi
-          echo "---- stdout ----";  jq -r '.stdout // empty' exec.json
-          echo "---- stderr ----";  jq -r '.stderr // empty' exec.json | tail -n 40
-          echo "---- exitCode: $(jq -r '.exitCode' exec.json)"
-          { echo "### coder turn"; echo "sandbox: \`$SANDBOX_ID\`  exit: \`$(jq -r '.exitCode' exec.json)\`"; echo '```'; jq -r '.stdout // empty' exec.json | tail -n 40; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-          EC="$(jq -r '.exitCode' exec.json)"
-          if [ "$EC" != "0" ]; then echo "VERDICT: FAILED — coder exited $EC (red, no false green)"; exit 1; fi
-          if [ -n "${JOB_REPO:-}" ] && ! jq -r '.stdout // empty' exec.json | grep -q '^PUSHED '; then
-            echo "VERDICT: FAILED — repo job ended with no pushed branch"; exit 1
-          fi
-          echo "VERDICT: OK — coder exit 0${JOB_REPO:+, branch pushed: $(jq -r '.stdout // empty' exec.json | grep '^PUSHED ' | head -1)}"
+        run: bash coder/run-job.sh
 
       - name: Destroy the sandbox (free the container, even on failure)
         if: always()
