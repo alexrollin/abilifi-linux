@@ -42,6 +42,19 @@ jobs:
             [ -n "$F" ] || { echo "no new job file in this push" >&2; exit 1; }
             echo "job file: $F"; P="$(cat "$F")"
           fi
+          # Optional header (top of the job text, ends at the first non-header line):
+          #   repo: owner/name   base: master   branch: coder/x   ticket: BEB-123
+          # With a repo the coder clones it, works on a NEW branch (never the base) and pushes that branch.
+          hdr() { printf '%s\n' "$P" | awk 'BEGIN{h=1} h && /^(repo|base|branch|ticket):/ {print; next} {h=0}' | sed -n "s/^$1:[[:space:]]*//p" | head -1 | tr -d '\r'; }
+          JOB_REPO="$(hdr repo)"; JOB_BASE="$(hdr base)"; JOB_BRANCH="$(hdr branch)"; JOB_TICKET="$(hdr ticket)"
+          P="$(printf '%s\n' "$P" | awk 'BEGIN{h=1} h && /^(repo|base|branch|ticket):/ {next} {h=0; print}' | sed '1{/^[[:space:]]*$/d}')"
+          [ -z "$JOB_REPO" ] || printf '%s' "$JOB_REPO" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' || { echo "bad repo: $JOB_REPO" >&2; exit 1; }
+          JOB_BASE="${JOB_BASE:-master}"
+          JOB_BRANCH="${JOB_BRANCH:-coder/${JOB_TICKET:-job}-$(date -u +%Y%m%d%H%M%S)}"
+          printf '%s' "$JOB_BRANCH" | grep -Eq '^[A-Za-z0-9._/-]+$' || { echo "bad branch: $JOB_BRANCH" >&2; exit 1; }
+          case "$JOB_BRANCH" in master|main|"$JOB_BASE") echo "refusing to push the base branch ($JOB_BRANCH)" >&2; exit 1;; esac
+          echo "job: repo=${JOB_REPO:-none} base=$JOB_BASE branch=$JOB_BRANCH ticket=${JOB_TICKET:-none}"
+          { echo "JOB_REPO=$JOB_REPO"; echo "JOB_BASE=$JOB_BASE"; echo "JOB_BRANCH=$JOB_BRANCH"; echo "JOB_TICKET=$JOB_TICKET"; } >> "$GITHUB_ENV"
           { echo 'JOB_PROMPT<<__EOP__'; printf '%s\n' "$P"; echo '__EOP__'; } >> "$GITHUB_ENV"
       - uses: actions/setup-node@v4
         with:
@@ -65,6 +78,12 @@ jobs:
           for v in "$KEY" "$EMAIL" "$ORK"; do echo "::add-mask::$v"; done
           { echo "CLOUDFLARE_API_KEY=$KEY"; echo "CLOUDFLARE_EMAIL=$EMAIL"; echo "OR_KEY=$ORK"; } >> "$GITHUB_ENV"
           echo "creds loaded (lengths: cf-key ${#KEY}, email ${#EMAIL}, model-key ${#ORK})"
+          if [ -n "${JOB_REPO:-}" ]; then
+            GHT="$(get GITHUB_TOKEN)"
+            [ -n "$GHT" ] || { echo "MISSING: vault GITHUB_TOKEN empty (job needs repo access)" >&2; exit 1; }
+            echo "::add-mask::$GHT"; echo "GHTOK=$GHT" >> "$GITHUB_ENV"
+            echo "github token loaded for $JOB_REPO (length ${#GHT})"
+          fi
 
       - name: Open the gate for THIS run only (fresh random worker secret)
         run: |
@@ -102,7 +121,10 @@ jobs:
           PROMPT: ${{ env.JOB_PROMPT }}
         run: |
           set -euo pipefail
-          { printf 'export OPENROUTER_API_KEY=%q\n' "$OR_KEY"; printf 'export PROMPT=%q\n' "$PROMPT"; cat coder/boot.sh; } > run.sh
+          { printf 'export OPENROUTER_API_KEY=%q\n' "$OR_KEY"; printf 'export PROMPT=%q\n' "$PROMPT";
+            printf 'export REPO=%q BASE=%q BRANCH=%q TICKET=%q\n' "${JOB_REPO:-}" "${JOB_BASE:-master}" "${JOB_BRANCH:-}" "${JOB_TICKET:-}";
+            [ -z "${GHTOK:-}" ] || printf 'export GHTOK=%q\n' "$GHTOK";
+            cat coder/boot.sh; } > run.sh
           BODY="$(jq -n --arg id "$SANDBOX_ID" --rawfile code run.sh '{id:$id, code:$code, lang:"bash"}')"
           curl -sS --max-time 1200 -o exec.json -w 'exec http %{http_code}\n' -X POST "$WORKER_URL/linux/exec" \
             -H "X-Linux-Gate: $GATE" -H "Authorization: Bearer bb_000coder" -H 'Content-Type: application/json' -d "$BODY"
