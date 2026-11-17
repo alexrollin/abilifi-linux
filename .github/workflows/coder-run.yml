@@ -7,6 +7,11 @@ name: Run a coder turn in the container (BEB-9809)
 # the vault by name (openrouter:key) and is never printed. Secrets are masked in logs.
 
 on:
+  # Any agent with git access sends a job by committing one file under jobs/ (the file's text is the prompt).
+  # Interim until the coder pulls tickets itself (BEB-9847).
+  push:
+    branches: [master]
+    paths: ['jobs/**']
   workflow_dispatch:
     inputs:
       prompt:
@@ -25,6 +30,19 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Pick the job prompt (dispatch input, or the job file just pushed)
+        env:
+          INPUT_PROMPT: ${{ env.JOB_PROMPT }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_PROMPT:-}" ]; then P="$INPUT_PROMPT"; else
+            F="$(git diff --name-only --diff-filter=A HEAD~1 HEAD -- jobs/ | head -1)"
+            [ -n "$F" ] || { echo "no new job file in this push" >&2; exit 1; }
+            echo "job file: $F"; P="$(cat "$F")"
+          fi
+          { echo 'JOB_PROMPT<<__EOP__'; printf '%s\n' "$P"; echo '__EOP__'; } >> "$GITHUB_ENV"
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
