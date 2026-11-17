@@ -34,7 +34,7 @@ jobs:
           fetch-depth: 2
       - name: Pick the job prompt (dispatch input, or the job file just pushed)
         env:
-          INPUT_PROMPT: ${{ env.JOB_PROMPT }}
+          INPUT_PROMPT: ${{ github.event.inputs.prompt }}
         run: |
           set -euo pipefail
           if [ -n "${INPUT_PROMPT:-}" ]; then P="$INPUT_PROMPT"; else
@@ -99,7 +99,7 @@ jobs:
 
       - name: Run the coder turn inside the sandbox
         env:
-          PROMPT: ${{ github.event.inputs.prompt }}
+          PROMPT: ${{ env.JOB_PROMPT }}
         run: |
           set -euo pipefail
           { printf 'export OPENROUTER_API_KEY=%q\n' "$OR_KEY"; printf 'export PROMPT=%q\n' "$PROMPT"; cat coder/boot.sh; } > run.sh
