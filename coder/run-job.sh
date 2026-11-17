@@ -33,7 +33,9 @@ for attempt in 1 2 3; do
     echo "---- RAW exec response (not JSON) ----"; head -c 800 exec.json; echo
     echo '{"exitCode":-1,"stdout":""}' > exec.json
   fi
-  if [ "$(jq -r '.exitCode' exec.json)" = "-1" ] && [ -z "$(jq -r '.stdout // empty' exec.json)" ] && [ "$ELAPSED" -lt 90 ] && [ "$attempt" -lt 3 ]; then
+  FAILED_EXEC=0
+  { [ "$(jq -r '.exitCode // -1' exec.json)" = "-1" ] || [ -n "$(jq -r '.error // empty' exec.json)" ]; } && FAILED_EXEC=1
+  if [ "$FAILED_EXEC" = "1" ] && [ -z "$(jq -r '.stdout // empty' exec.json)" ] && [ "$ELAPSED" -lt 90 ] && [ "$attempt" -lt 3 ]; then
     echo "exec failed fast (${ELAPSED}s, nothing ran): $(jq -c '{error,name}' exec.json) — destroying and retrying"
     destroy "$ID"; sleep 20; continue
   fi
@@ -45,7 +47,7 @@ done
 echo "---- stdout ----";  jq -r '.stdout // empty' exec.json
 echo "---- stderr ----";  jq -r '.stderr // empty' exec.json | tail -n 40
 jq -c 'select(.error) | {error,name}' exec.json
-EC="$(jq -r '.exitCode' exec.json)"
+EC="$(jq -r '.exitCode // -1' exec.json)"
 echo "---- exitCode: $EC"
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
   { echo "### coder turn"; echo "sandbox: \`$ID\`  exit: \`$EC\`"; echo '```'; jq -r '.stdout // empty' exec.json | tail -n 40; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
