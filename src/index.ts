@@ -5,17 +5,23 @@
 import { getSandbox } from '@cloudflare/sandbox';
 export { Sandbox } from '@cloudflare/sandbox';
 
-interface Env { DB: D1Database; Sandbox: DurableObjectNamespace; LINUX_GATE?: string }
+interface Env { DB: D1Database; Sandbox: DurableObjectNamespace }
 
-// SECURITY (11-16, Fable m73484/m73485): the old auth was `startsWith('Bearer bb_')` only — any forged header
-// passed, and /linux/exec runs arbitrary bash in a container billed to the account. Interim gate until the
-// vault/Ory verification lands (BEB-9807): FAIL CLOSED. With no LINUX_GATE worker secret every route is 503;
-// with one, the caller must present it in X-Linux-Gate, compared in constant time, independent of the vault.
-function ctEq(a: string, b: string): boolean {
-  const enc = new TextEncoder(), x = enc.encode(a), y = enc.encode(b);
-  let d = x.length ^ y.length;
-  for (let i = 0; i < Math.max(x.length, y.length); i++) d |= (x[i] ?? 0) ^ (y[i] ?? 0);
-  return d === 0;
+// SECURITY (11-16, Fable m73484/m73485; per-run gates 11-19, Fable m73640/m73643): /linux/exec runs arbitrary bash in a
+// container billed to the account, so FAIL CLOSED. Each coder run registers ITS OWN gate: the workflow stores only the
+// SHA-256 of a fresh random value in D1 (run_gates, with an expiry) and deletes that row when the run ends. A request must
+// present the value in X-Linux-Gate; we hash it and look it up. Runs no longer overwrite one shared secret, so they can be
+// parallel. No row = 401. (The old LINUX_GATE worker secret is no longer read.)
+async function sha256hex(s: string): Promise<string> {
+  const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
+  return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+async function gateOk(env: Env, presented: string): Promise<boolean> {
+  if (presented.length < 32) return false;
+  await env.DB.exec('CREATE TABLE IF NOT EXISTS run_gates(hash TEXT PRIMARY KEY, exp INTEGER NOT NULL)');
+  const row = await env.DB.prepare('SELECT 1 AS ok FROM run_gates WHERE hash = ? AND exp > ?')
+    .bind(await sha256hex(presented), Math.floor(Date.now() / 1000)).first();
+  return !!row;
 }
 
 let schemaReady: Promise<void> | null = null;
@@ -29,11 +35,7 @@ function ensureSchema(env: Env): Promise<void> {
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
-    const gate = env.LINUX_GATE;
-    if (!gate || gate.length < 32) {
-      return new Response('Service disabled: awaiting verified auth (BEB-9807 / BEB-9809)', { status: 503 });
-    }
-    if (!ctEq(req.headers.get('X-Linux-Gate') || '', gate)) {
+    if (!(await gateOk(env, req.headers.get('X-Linux-Gate') || ''))) {
       return new Response('Unauthorized (gate)', { status: 401 });
     }
     const authHeader = req.headers.get('Authorization');

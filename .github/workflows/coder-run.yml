@@ -2,8 +2,8 @@ name: Run a coder turn in the container (BEB-9809)
 
 # The headless coder route (Fable m73485 #2): GitHub Actions drives the abilifi-linux sandbox, so no Intent app,
 # no laptop and no person is involved. The sandbox's provision/exec are FAIL-CLOSED (503 with no LINUX_GATE).
-# Per run: a fresh random gate is generated, set as the worker secret, used for this run only, and ROTATED AWAY
-# at the end — nobody holds the gate between runs, so the route is closed to the world. The model key comes from
+# Per run: a fresh random gate is generated; only its SHA-256 goes into D1 (run_gates, expiry 40 min); the run uses it and
+# DELETES its own row at the end — nobody holds a valid gate between runs, and runs no longer cancel each other (parallel). The model key comes from
 # the vault by name (openrouter:key) and is never printed. Secrets are masked in logs.
 
 on:
@@ -19,9 +19,7 @@ on:
         required: true
         default: "Create the file /workspace/hello.txt containing exactly: coder-ok-from-container. Then print the file."
 
-concurrency:
-  group: coder-run
-  cancel-in-progress: false
+# No shared concurrency group: each run has its OWN gate (a hashed row in D1), so runs can be parallel (BEB-9847 C6, Fable m73640).
 
 env:
   CLOUDFLARE_ACCOUNT_ID: e7eb1ac8384be6f4f05e8f95c4b3240a
@@ -90,25 +88,26 @@ jobs:
             echo "github token loaded for $JOB_REPO (length ${#GHT})"
           fi
 
-      - name: Open the gate for THIS run only (fresh random worker secret)
+      - name: Open a gate for THIS run only (own random value; only its SHA-256 is stored, with an expiry)
         run: |
           set -euo pipefail
           GATE="$(openssl rand -hex 32)"
           echo "::add-mask::$GATE"
           echo "GATE=$GATE" >> "$GITHUB_ENV"
-          printf '%s' "$GATE" | npx wrangler secret put LINUX_GATE
-          # wait until EVERY isolate we hit accepts this run's gate: with the gate header the status route answers
-          # 404 (gate + org auth pass, unknown id); a stale isolate still holding the old/rotated gate answers 401.
-          # Require 6 consecutive 404s (a secret update does not roll out to all isolates atomically).
+          HASH="$(printf '%s' "$GATE" | sha256sum | cut -d' ' -f1)"
+          echo "GATE_HASH=$HASH" >> "$GITHUB_ENV"
+          EXP=$(( $(date +%s) + 2400 ))
+          npx wrangler d1 execute abilifi-linux-db --remote --command "CREATE TABLE IF NOT EXISTS run_gates(hash TEXT PRIMARY KEY, exp INTEGER NOT NULL); DELETE FROM run_gates WHERE exp < $(date +%s); INSERT OR REPLACE INTO run_gates(hash, exp) VALUES('$HASH', $EXP);"
+          # with the gate header the status route answers 404 (gate + org auth pass, unknown id); a bad gate answers 401
           ok=0
-          for i in $(seq 1 60); do
+          for i in $(seq 1 30); do
             code="$(curl -s -o /dev/null -w '%{http_code}' -H "X-Linux-Gate: $GATE" -H 'Authorization: Bearer bb_000coder' "$WORKER_URL/linux/status/x" || true)"
             echo "gate check $i: with-gate -> $code"
             if [ "$code" = "404" ]; then ok=$((ok+1)); else ok=0; fi
-            [ "$ok" -ge 6 ] && break
-            sleep 4
+            [ "$ok" -ge 3 ] && break
+            sleep 3
           done
-          [ "$ok" -ge 6 ] || { echo "gate never took effect everywhere" >&2; exit 1; }
+          [ "$ok" -ge 3 ] || { echo "gate never took effect" >&2; exit 1; }
 
       - name: Provision + run the coder turn (retries only fast failures where nothing ran)
         env:
@@ -124,8 +123,9 @@ jobs:
             -d "{\"id\":\"$SANDBOX_ID\"}" || true
           echo
 
-      - name: Close the gate again (rotate to a value nobody knows)
+      - name: Close this run's gate (delete only its own row)
         if: always()
         run: |
-          openssl rand -hex 32 | npx wrangler secret put LINUX_GATE
-          echo "gate rotated away — the route is closed to everyone until the next run"
+          [ -n "${GATE_HASH:-}" ] || { echo "no gate to close"; exit 0; }
+          npx wrangler d1 execute abilifi-linux-db --remote --command "DELETE FROM run_gates WHERE hash = '$GATE_HASH';" || true
+          echo "this run's gate closed; other runs' gates untouched"

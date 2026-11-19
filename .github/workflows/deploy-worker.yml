@@ -1,0 +1,40 @@
+name: Deploy the abilifi-linux worker (BEB-9847)
+
+# The worker is deployed from here so no laptop is involved. Credentials come from the vault by name (same as coder-run).
+on:
+  push:
+    branches: [master]
+    paths: ['src/**', 'wrangler.jsonc', 'Dockerfile', 'package.json']
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-worker
+  cancel-in-progress: false
+
+env:
+  CLOUDFLARE_ACCOUNT_ID: e7eb1ac8384be6f4f05e8f95c4b3240a
+  VAULT_URL: https://abilifi-vault.alex-rollin.workers.dev
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci || npm install
+      - name: Credentials from the vault by name
+        env:
+          VAULT_KEY: ${{ secrets.VAULT_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "${VAULT_KEY:-}" ] || { echo "MISSING: VAULT_KEY repo secret" >&2; exit 1; }
+          get() { curl -sS --fail-with-body -X POST "$VAULT_URL/vault/checkout-self" -H "Authorization: Bearer $VAULT_KEY" -H "Content-Type: application/json" -d "{\"name\":\"$1\"}" | jq -r '.token // .value // empty'; }
+          KEY="$(get cf:keeper-global-key)"; EMAIL="$(get cf:keeper-email)"
+          [ -n "$KEY" ] && [ -n "$EMAIL" ] || { echo "MISSING: a vault cred came back empty" >&2; exit 1; }
+          echo "::add-mask::$KEY"; echo "::add-mask::$EMAIL"
+          { echo "CLOUDFLARE_API_KEY=$KEY"; echo "CLOUDFLARE_EMAIL=$EMAIL"; } >> "$GITHUB_ENV"
+      - name: Deploy
+        run: npx wrangler deploy
